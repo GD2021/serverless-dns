@@ -13,6 +13,8 @@ import * as pres from "./plugin-response.js";
 
 const minTtlSec = 30; // 30s
 const maxTtlSec = 180; // 3m
+const expiresImmediately = 0; // 0s
+const someVeryHighTtl = 1 << 30; // 2^30s
 const cheader = "x-rdnscache-metadata";
 const _cacheurl = "https://caches.rethinkdns.com/";
 
@@ -21,9 +23,6 @@ const _cacheHeaderHitValue = "hit";
 const _cacheHeaders = { [_cacheHeaderKey]: _cacheHeaderHitValue };
 
 function determineCacheExpiry(packet) {
-  const expiresImmediately = 0;
-  const someVeryHighTtl = 1 << 30;
-
   // TODO: do not cache :: / 0.0.0.0 upstream answers?
   // expiresImmediately => packet is not an ans but a question
   if (!dnsutil.isAnswer(packet)) return expiresImmediately;
@@ -38,10 +37,11 @@ function determineCacheExpiry(packet) {
   // if no answers, set min-ttl
   if (ttl === someVeryHighTtl) ttl = minTtlSec;
 
+  // see also: isAnswerFresh
   ttl += envutil.cacheTtl();
   const expiry = Date.now() + ttl * 1000;
 
-  return expiry;
+  return expiry; // in millis
 }
 
 /**
@@ -107,7 +107,7 @@ export function cacheValueOf(rdnsResponse) {
   return makeCacheValue(packet, raw, metadata);
 }
 
-export function updateTtl(packet, end) {
+function updateTtl(packet, end) {
   const now = Date.now();
   const actualttl = Math.floor((end - now) / 1000) - envutil.cacheTtl();
   // jitter between min/max to prevent uniform expiry across clients
@@ -118,7 +118,7 @@ export function updateTtl(packet, end) {
   }
 }
 
-function makeId(packet) {
+export function makeId(packet) {
   // multiple questions are kind of an undefined behaviour
   // stackoverflow.com/a/55093896
   if (!dnsutil.hasSingleQuestion(packet)) return null;
@@ -199,7 +199,7 @@ export function hasCacheHeader(h) {
   return h.get(_cacheHeaderKey) === _cacheHeaderHitValue;
 }
 
-export function updateQueryId(decodedDnsPacket, queryId) {
+function updateQueryId(decodedDnsPacket, queryId) {
   if (queryId === decodedDnsPacket.id) return false; // no change
   decodedDnsPacket.id = queryId;
   return true;
@@ -223,11 +223,20 @@ export function hasMetadata(m) {
   return !util.emptyObj(m);
 }
 
+/**
+ * @param {DnsCacheData} v
+ * @returns {boolean}
+ */
 export function hasAnswer(v) {
   if (!hasMetadata(v.metadata)) return false;
   return isAnswerFresh(v.metadata, /* no roll*/ 6);
 }
 
+/**
+ * @param {DnsCacheMetadata} m
+ * @param {number} n
+ * @returns {boolean}
+ */
 export function isAnswerFresh(m, n = 0) {
   // when expiry is 0, c.dnsPacket is a question and not an ans
   // ref: determineCacheExpiry

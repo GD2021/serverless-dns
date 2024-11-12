@@ -8,6 +8,12 @@
 
 // musn't import /depend on anything.
 
+export function isProd() {
+  if (!envManager) return false;
+
+  return envManager.determineEnvStage() === "production";
+}
+
 export function onFly() {
   if (!envManager) return false;
 
@@ -45,6 +51,11 @@ export function hasDisk() {
   return onFly() || onLocal();
 }
 
+export function useMmap() {
+  // got disk on fly and local deploys
+  return (onFly() || onLocal()) && (isNode() || isBun());
+}
+
 export function hasDynamicImports() {
   if (onDenoDeploy() || onCloudflare() || onFastly()) return false;
   return true;
@@ -52,6 +63,12 @@ export function hasDynamicImports() {
 
 export function hasHttpCache() {
   return isWorkers();
+}
+
+export function isBun() {
+  if (!envManager) return false;
+
+  return envManager.r() === "bun";
 }
 
 export function isWorkers() {
@@ -78,6 +95,9 @@ export function isDeno() {
   return envManager.r() === "deno";
 }
 
+/**
+ * in milliseconds
+ */
 export function workersTimeout(missing = 0) {
   if (!envManager) return missing;
   return envManager.get("WORKER_TIMEOUT") || missing;
@@ -185,14 +205,14 @@ export function isCleartext() {
 
 // sysctl get net.ipv4.tcp_syn_backlog
 export function tcpBacklog() {
-  if (!envManager) return 100;
+  if (!envManager) return 600; // same as fly.service soft_limit
 
-  return envManager.get("TCP_BACKLOG") || 100;
+  return envManager.get("TCP_BACKLOG") || 600;
 }
 
 // don't forget to update the fly.toml too
 export function maxconns() {
-  if (!envManager) return 1000;
+  if (!envManager) return 1000; // 25% higher than fly.service hard_limit
 
   return envManager.get("MAXCONNS") || 1000;
 }
@@ -216,12 +236,10 @@ export function shutdownTimeoutMs() {
 }
 
 export function measureHeap() {
-  // disable; webpack can't bundle memwatch; see: server-node.js
-  return false;
   if (!envManager) return false;
   const reg = region();
   if (
-    reg === "maa" ||
+    reg === "bom" ||
     reg === "sin" ||
     reg === "fra" ||
     reg === "ams" ||
@@ -302,16 +320,6 @@ export function forceDoh() {
   return envManager.get("NODE_DOH_ONLY") || false;
 }
 
-export function avoidFetch() {
-  if (!envManager) return false;
-
-  // on other runtimes, continue using fetch
-  if (!isNode()) return false;
-
-  // on node, default to avoiding fetch
-  return envManager.get("NODE_AVOID_FETCH") || false;
-}
-
 export function disableDnsCache() {
   // disable when profiling dns resolutions
   return profileDnsResolves();
@@ -333,6 +341,7 @@ export function blockSubdomains() {
 }
 
 // recurisve resolver on Fly
+// see: node/config.js#prep
 export function recursive() {
   return onFly();
 }

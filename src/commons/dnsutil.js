@@ -18,19 +18,10 @@ export const dnsPacketHeaderSize = 12;
 export const minDNSPacketSize = dnsPacketHeaderSize + 5;
 export const maxDNSPacketSize = 4096;
 
-// TODO: move _dns* related settings to env
-const _dnsCloudflareSec4 = "1.1.1.2";
-const _dnsFly6 = "fdaa::3";
 const _dnsCacheSize = 30000;
 
 const _minRequestTimeout = 4000; // 4s
 const _maxRequestTimeout = 30000; // 30s
-
-export function dnsaddr() {
-  // flydns is always ipv6 (fdaa::53)
-  if (envutil.recursive()) return _dnsFly6;
-  return _dnsCloudflareSec4;
-}
 
 export function cacheSize() {
   return _dnsCacheSize;
@@ -155,6 +146,13 @@ export function dropOPT(packet) {
   const filtered = [];
   for (const a of packet.additionals) {
     if (optAnswer(a)) {
+      // github.com/mafintosh/dns-packet/blob/7b6662025c/index.js#L711
+      // case 3 (nsid), 10 (cookie) not encoded
+      // case 5, 6, 7 not implemented
+      // case 8 (ecs), 11 (keep-alive) discarded
+      // case 12 (padding) discarded from caches
+      // case 9 (expire), 13 (chain) experimental, not supported
+      // case 14 (key-tag)
       rmv = true;
       continue;
     }
@@ -379,9 +377,19 @@ export function isAnswerQuad0(packet) {
   return isAnswerBlocked(packet.answers);
 }
 
+export function ttl(packet) {
+  if (!hasAnswers(packet)) return 0;
+  return packet.answers[0].ttl || 0;
+}
+
+/**
+ * @param {any} dnsPacket
+ * @returns {string[]}
+ */
 export function extractDomains(dnsPacket) {
   if (!hasSingleQuestion(dnsPacket)) return [];
 
+  /** @type {string} */
   const names = new Set();
   const answers = dnsPacket.answers;
 
@@ -418,7 +426,7 @@ export function extractDomains(dnsPacket) {
 
 export function getInterestingAnswerData(packet, maxlen = 80, delim = "|") {
   if (!hasAnswers(packet)) {
-    return !util.emptyObj(packet) ? packet.rcode || "WTF" : "WTF";
+    return !util.emptyObj(packet) ? packet.rcode || "WTF1" : "WTF2";
   }
 
   // set to true if at least one ip has been captured from ans
@@ -537,6 +545,10 @@ export function getQueryType(packet) {
   return util.emptyString(qt) ? false : qt;
 }
 
+/**
+ * @param {string?} n
+ * @returns {string}
+ */
 export function normalizeName(n) {
   if (util.emptyString(n)) return n;
 
