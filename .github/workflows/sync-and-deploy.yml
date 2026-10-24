@@ -130,13 +130,12 @@ jobs:
         if: steps.check_deploy.outputs.deploy == 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: 'npm'
+          node-version: 22
 
       - name: 🏗️ Install Dependencies & Prepare Blocklists
         if: steps.check_deploy.outputs.deploy == 'true'
         run: |
-          npm ci || npm install
+          npm install --legacy-peer-deps
           ./src/build/pre.sh
 
       - name: 🔨 Build Application
