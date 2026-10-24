@@ -25,8 +25,8 @@ type = "ESModule"
 globs = ["**/*.js"]
 
 [vars]
-LOG_LEVEL = "debug"
-WORKER_ENV = "development"
+LOG_LEVEL = "info"
+WORKER_ENV = "production"
 CLOUD_PLATFORM = "cloudflare"
 
 ##################

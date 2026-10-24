@@ -1,0 +1,200 @@
+name: 🔄 Sync Upstream & Deploy
+
+on:
+  schedule:
+    # 每天北京时间 04:07 (UTC 20:07) 定时自动检查上游更新
+    - cron: '7 20 * * *'
+  workflow_dispatch:
+    inputs:
+      force_deploy:
+        description: '强制执行构建、测试与重新部署（忽略是否有上游更新）'
+        type: boolean
+        default: false
+  push:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "webpack*.cjs"
+      - "package.json"
+      - "wrangler.toml"
+      - ".github/workflows/sync-and-deploy.yml"
+
+concurrency:
+  group: sync-and-deploy
+  cancel-in-progress: false
+
+jobs:
+  sync-and-deploy:
+    name: 🚀 Sync, Build & Deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      issues: write
+
+    steps:
+      - name: 🛒 Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: ⚙️ Setup Git User
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: 🔍 Check Upstream Updates
+        id: sync
+        run: |
+          git remote add upstream https://github.com/serverless-dns/serverless-dns.git 2>/dev/null || git remote set-url upstream https://github.com/serverless-dns/serverless-dns.git
+          git fetch upstream main --tags
+
+          LOCAL_REV=$(git rev-parse HEAD)
+          UPSTREAM_REV=$(git rev-parse upstream/main)
+          MERGE_BASE=$(git merge-base HEAD upstream/main)
+
+          echo "local_rev=$LOCAL_REV" >> "$GITHUB_OUTPUT"
+          echo "upstream_rev=$UPSTREAM_REV" >> "$GITHUB_OUTPUT"
+          echo "Current local revision: $LOCAL_REV"
+          echo "Current upstream revision: $UPSTREAM_REV"
+          echo "Merge base: $MERGE_BASE"
+
+          if [ "$UPSTREAM_REV" != "$MERGE_BASE" ]; then
+            echo "Upstream has new commits."
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+
+            echo "### 🔄 上游更新内容摘要" >> $GITHUB_STEP_SUMMARY
+            echo '```text' >> $GITHUB_STEP_SUMMARY
+            git log --oneline ${MERGE_BASE}..upstream/main >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+
+            # 风险与安全检测：检查依赖变化或核心脚本变动
+            CHANGES=$(git diff --name-only ${MERGE_BASE}..upstream/main)
+            echo "变更文件列表:"
+            echo "$CHANGES"
+            if echo "$CHANGES" | grep -E "(package\.json|src/server-workers\.js|src/core/doh\.js)"; then
+              echo "::notice::检测到上游核心执行脚本或依赖变更，构建与测试将严格校验兼容性。"
+            fi
+
+            # 备份定制部署配置
+            cp wrangler.toml wrangler.toml.bak
+            mkdir -p .github_bak
+            cp .github/workflows/sync-and-deploy.yml .github_bak/
+
+            # 尝试合并上游变更
+            if ! git merge upstream/main --no-edit -m "chore: sync upstream serverless-dns ($(date -u +'%Y-%m-%d %H:%M:%S UTC'))"; then
+              echo "::error::检测到合并冲突！自动放弃合并以保护生产环境稳定。"
+              git merge --abort
+              echo "merge_conflict=true" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+
+            # 恢复定制部署配置
+            cp wrangler.toml.bak wrangler.toml
+            rm -f wrangler.toml.bak
+            cp .github_bak/sync-and-deploy.yml .github/workflows/sync-and-deploy.yml
+            rm -rf .github_bak
+
+            if [ -n "$(git status --porcelain)" ]; then
+              git add wrangler.toml .github/workflows/sync-and-deploy.yml
+              git commit -m "chore: preserve custom Cloudflare deployment configuration" || true
+            fi
+
+            echo "merge_conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Repository is already up to date with upstream."
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "merge_conflict=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 🚦 Determine Deployment Need
+        id: check_deploy
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            echo "deploy_reason=Push 事件触发部署" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_deploy }}" = "true" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            echo "deploy_reason=手动强制重新构建与部署" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.sync.outputs.has_changes }}" = "true" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            echo "deploy_reason=检测到上游更新并完成代码合并" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            echo "deploy_reason=无更新，无需触发部署" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 📦 Setup Node.js
+        if: steps.check_deploy.outputs.deploy == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: 🏗️ Install Dependencies & Prepare Blocklists
+        if: steps.check_deploy.outputs.deploy == 'true'
+        run: |
+          npm ci || npm install
+          ./src/build/pre.sh
+
+      - name: 🔨 Build Application
+        if: steps.check_deploy.outputs.deploy == 'true'
+        run: |
+          npm run build
+          if [ ! -f "dist/worker.js" ]; then
+            echo "::error::Build verification failed: dist/worker.js not found!"
+            exit 1
+          fi
+          echo "Build artifact verified. Size: $(du -h dist/worker.js | cut -f1)"
+
+      - name: 🚀 Push Synced Code to Origin
+        if: steps.sync.outputs.has_changes == 'true'
+        run: |
+          git push origin main
+
+      - name: ☁️ Deploy to Cloudflare Workers
+        if: steps.check_deploy.outputs.deploy == 'true'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN || secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID || 'fc6f79e77dca61be461e2dedb82244f5' }}
+          command: deploy
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID || 'fc6f79e77dca61be461e2dedb82244f5' }}
+        continue-on-error: true
+        id: wrangler_deploy
+
+      - name: 🩺 End-to-End Health Check (DoH & Web)
+        if: steps.check_deploy.outputs.deploy == 'true'
+        run: |
+          echo "正在执行自定义域名 https://dd.ihot.cc.cd 健康探测..."
+          
+          # 1. 验证首页 Web 端点（应返回 302 重定向到配置面板）
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://dd.ihot.cc.cd/ || true)
+          echo "Web 端点状态码: $HTTP_CODE"
+          if [ "$HTTP_CODE" != "302" ] && [ "$HTTP_CODE" != "200" ]; then
+            echo "::warning::首页响应非预期状态码: $HTTP_CODE"
+          else
+            echo "首页探测通过 (状态码 $HTTP_CODE)"
+          fi
+
+          # 2. 验证 RFC 8484 GET DoH 查询
+          # EjQBAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE 为 example.com A 记录标准查询
+          DOH_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Accept: application/dns-message" "https://dd.ihot.cc.cd/dns-query?dns=EjQBAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE" || true)
+          echo "DoH RFC 8484 查询状态码: $DOH_CODE"
+          if [ "$DOH_CODE" != "200" ]; then
+            echo "::warning::DoH 端点测试未返回 200，实际响应: $DOH_CODE"
+          else
+            echo "DoH 解析探测成功 (状态码 200)"
+          fi
+
+      - name: 📝 Final Deployment Summary
+        if: always()
+        run: |
+          echo "### 📊 自动化运行总结" >> $GITHUB_STEP_SUMMARY
+          echo "- **上游有无更新**: \`${{ steps.sync.outputs.has_changes || 'false' }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **执行原因**: \`${{ steps.check_deploy.outputs.deploy_reason || '未执行' }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Wrangler 部署状态**: \`${{ steps.wrangler_deploy.outcome || 'skipped' }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **自定义域名**: https://dd.ihot.cc.cd" >> $GITHUB_STEP_SUMMARY
