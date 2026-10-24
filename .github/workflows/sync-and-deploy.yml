@@ -153,8 +153,20 @@ jobs:
         run: |
           git push origin main
 
+      - name: 🔑 Check Cloudflare Credentials
+        if: steps.check_deploy.outputs.deploy == 'true'
+        id: check_token
+        run: |
+          if [ -n "$CF_TOKEN" ]; then
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN || secrets.CF_API_TOKEN }}
+
       - name: ☁️ Deploy to Cloudflare Workers
-        if: steps.check_deploy.outputs.deploy == 'true' && (secrets.CLOUDFLARE_API_TOKEN != '' || secrets.CF_API_TOKEN != '')
+        if: steps.check_deploy.outputs.deploy == 'true' && steps.check_token.outputs.has_token == 'true'
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN || secrets.CF_API_TOKEN }}
@@ -166,7 +178,7 @@ jobs:
         id: wrangler_deploy
 
       - name: 📢 Cloudflare Deployment Notice
-        if: steps.check_deploy.outputs.deploy == 'true' && secrets.CLOUDFLARE_API_TOKEN == '' && secrets.CF_API_TOKEN == ''
+        if: steps.check_deploy.outputs.deploy == 'true' && steps.check_token.outputs.has_token != 'true'
         run: |
           echo "::notice::当前 GitHub 仓库未配置 CLOUDFLARE_API_TOKEN Secret。代码同步与本地构建校验已顺利通过！若需 GitHub Actions 自动发布生产，请在仓库 Settings -> Secrets and variables -> Actions 中添加 CLOUDFLARE_API_TOKEN。"
 
