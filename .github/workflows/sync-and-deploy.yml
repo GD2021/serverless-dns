@@ -154,7 +154,7 @@ jobs:
           git push origin main
 
       - name: ☁️ Deploy to Cloudflare Workers
-        if: steps.check_deploy.outputs.deploy == 'true'
+        if: steps.check_deploy.outputs.deploy == 'true' && (secrets.CLOUDFLARE_API_TOKEN != '' || secrets.CF_API_TOKEN != '')
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN || secrets.CF_API_TOKEN }}
@@ -164,6 +164,11 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID || 'fc6f79e77dca61be461e2dedb82244f5' }}
         continue-on-error: true
         id: wrangler_deploy
+
+      - name: 📢 Cloudflare Deployment Notice
+        if: steps.check_deploy.outputs.deploy == 'true' && secrets.CLOUDFLARE_API_TOKEN == '' && secrets.CF_API_TOKEN == ''
+        run: |
+          echo "::notice::当前 GitHub 仓库未配置 CLOUDFLARE_API_TOKEN Secret。代码同步与本地构建校验已顺利通过！若需 GitHub Actions 自动发布生产，请在仓库 Settings -> Secrets and variables -> Actions 中添加 CLOUDFLARE_API_TOKEN。"
 
       - name: 🩺 End-to-End Health Check (DoH & Web)
         if: steps.check_deploy.outputs.deploy == 'true'
